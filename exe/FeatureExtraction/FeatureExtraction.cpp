@@ -38,236 +38,122 @@
 // Local includes
 #include "LandmarkCoreIncludes.h"
 
-#include <Face_utils.h>
 #include <FaceAnalyser.h>
-#include <GazeEstimation.h>
-#include <RecorderOpenFace.h>
-#include <RecorderOpenFaceParameters.h>
 #include <SequenceCapture.h>
-#include <Visualizer.h>
-#include <VisualizationUtils.h>
+
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+#include <Python.h>
 
 #ifndef CONFIG_DIR
 #define CONFIG_DIR "~"
 #endif
+#include <ImageManipulationHelpers.h>
 
-#define INFO_STREAM( stream ) \
-std::cout << stream << std::endl
+namespace py = pybind11;
 
-#define WARN_STREAM( stream ) \
-std::cout << "Warning: " << stream << std::endl
+cv::Mat numpy_to_cv_mat(py::array_t<unsigned char>& input) {
 
-#define ERROR_STREAM( stream ) \
-std::cout << "Error: " << stream << std::endl
+	if (input.ndim() != 3)
+		throw std::runtime_error("3-channel image must be 3 dims ");
 
-static void printErrorAndAbort(const std::string & error)
-{
-	std::cout << error << std::endl;
+	py::buffer_info buf = input.request();
+
+	cv::Mat mat(buf.shape[0], buf.shape[1], CV_8UC3, (unsigned char*)buf.ptr);
+
+	return mat;
 }
 
-#define FATAL_STREAM( stream ) \
-printErrorAndAbort( std::string( "Fatal error: " ) + stream )
+class AUs {
+public:
+	AUs(const std::string& models_path) {
+		arguments.push_back(models_path);
+		arguments.push_back("-aus");
+		// Load face landmark detector
+		det_parameters = new LandmarkDetector::FaceModelParameters(arguments);
+		face_model = new LandmarkDetector::CLNF((*det_parameters).model_location);
 
-std::vector<std::string> get_arguments(int argc, char **argv)
-{
-
-	std::vector<std::string> arguments;
-
-	// First argument is reserved for the name of the executable
-	for (int i = 0; i < argc; ++i)
-	{
-		arguments.push_back(std::string(argv[i]));
-	}
-	return arguments;
-}
-
-int main(int argc, char **argv)
-{
-
-	std::vector<std::string> arguments = get_arguments(argc, argv);
-
-	// no arguments: output usage
-	if (arguments.size() == 1)
-	{
-		std::cout << "For command line arguments see:" << std::endl;
-		std::cout << " https://github.com/TadasBaltrusaitis/OpenFace/wiki/Command-line-arguments";
-		return 0;
-	}
-
-	// Load the modules that are being used for tracking and face analysis
-	// Load face landmark detector
-	LandmarkDetector::FaceModelParameters det_parameters(arguments);
-	// Always track gaze in feature extraction
-	LandmarkDetector::CLNF face_model(det_parameters.model_location);
-
-	if (!face_model.loaded_successfully)
-	{
-		std::cout << "ERROR: Could not load the landmark detector" << std::endl;
-		return 1;
-	}
-
-	// Load facial feature extractor and AU analyser
-	FaceAnalysis::FaceAnalyserParameters face_analysis_params(arguments);
-	FaceAnalysis::FaceAnalyser face_analyser(face_analysis_params);
-
-	if (!face_model.eye_model)
-	{
-		std::cout << "WARNING: no eye model found" << std::endl;
-	}
-
-	if (face_analyser.GetAUClassNames().size() == 0 && face_analyser.GetAUClassNames().size() == 0)
-	{
-		std::cout << "WARNING: no Action Unit models found" << std::endl;
-	}
-
-	Utilities::SequenceCapture sequence_reader;
-
-	// A utility for visualizing the results
-	Utilities::Visualizer visualizer(arguments);
-
-	// Tracking FPS for visualization
-	Utilities::FpsTracker fps_tracker;
-	fps_tracker.AddFrame();
-
-	while (true) // this is not a for loop as we might also be reading from a webcam
-	{
-
-		// The sequence reader chooses what to open based on command line arguments provided
-		if (!sequence_reader.Open(arguments))
-			break;
-
-		INFO_STREAM("Device or file opened");
-
-		if (sequence_reader.IsWebcam())
+		if (!(*face_model).loaded_successfully)
 		{
-			INFO_STREAM("WARNING: using a webcam in feature extraction, Action Unit predictions will not be as accurate in real-time webcam mode");
-			INFO_STREAM("WARNING: using a webcam in feature extraction, forcing visualization of tracking to allow quitting the application (press q)");
-			visualizer.vis_track = true;
+			throw std::runtime_error("ERROR: Could not load the landmark detector");
 		}
 
-		cv::Mat captured_image;
+		// Load facial feature extractor and AU analyser
+		face_analysis_params = new FaceAnalysis::FaceAnalyserParameters(arguments);
+		face_analyser = new FaceAnalysis::FaceAnalyser(*face_analysis_params);
 
-		Utilities::RecorderOpenFaceParameters recording_params(arguments, true, sequence_reader.IsWebcam(),
-			sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy, sequence_reader.fps);
-		if (!face_model.eye_model)
+		if ((*face_analyser).GetAUClassNames().size() == 0 && (*face_analyser).GetAUClassNames().size() == 0)
 		{
-			recording_params.setOutputGaze(false);
+			throw std::runtime_error("WARNING: no Action Unit models found");
 		}
-		Utilities::RecorderOpenFace open_face_rec(sequence_reader.name, recording_params, arguments);
 
-		if (recording_params.outputGaze() && !face_model.eye_model)
-			std::cout << "WARNING: no eye model defined, but outputting gaze" << std::endl;
+	}
 
-		captured_image = sequence_reader.GetNextFrame();
-
-		// For reporting progress
-		double reported_completion = 0;
-
-		INFO_STREAM("Starting tracking");
-		while (!captured_image.empty())
+	void add_frame(py::array_t<unsigned char>& input) {
+		frame = numpy_to_cv_mat(input);
+		Utilities::ConvertToGrayscale_8bit(frame, gray_frame);
+	}
+	void predict_aus() {
+		if (!frame.empty())
 		{
-			// Converting to grayscale
-			cv::Mat_<uchar> grayscale_image = sequence_reader.GetGrayFrame();
-
-
 			// The actual facial landmark detection / tracking
-			bool detection_success = LandmarkDetector::DetectLandmarksInVideo(captured_image, face_model, det_parameters, grayscale_image);
-			
-			// Gaze tracking, absolute gaze direction
-			cv::Point3f gazeDirection0(0, 0, 0); cv::Point3f gazeDirection1(0, 0, 0); cv::Vec2d gazeAngle(0, 0);
+			bool detection_success = LandmarkDetector::DetectLandmarksInVideo(frame, *face_model, *det_parameters, gray_frame);
 
-			if (detection_success && face_model.eye_model)
-			{
-				GazeAnalysis::EstimateGaze(face_model, gazeDirection0, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy, true);
-				GazeAnalysis::EstimateGaze(face_model, gazeDirection1, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy, false);
-				gazeAngle = GazeAnalysis::GetGazeAngle(gazeDirection0, gazeDirection1);
-			}
-			
 			// Do face alignment
 			cv::Mat sim_warped_img;
 			cv::Mat_<double> hog_descriptor; int num_hog_rows = 0, num_hog_cols = 0;
 
 			// Perform AU detection and HOG feature extraction, as this can be expensive only compute it if needed by output or visualization
-			if (recording_params.outputAlignedFaces() || recording_params.outputHOG() || recording_params.outputAUs() || visualizer.vis_align || visualizer.vis_hog || visualizer.vis_aus)
-			{
-				face_analyser.AddNextFrame(captured_image, face_model.detected_landmarks, face_model.detection_success, sequence_reader.time_stamp, sequence_reader.IsWebcam());
-				face_analyser.GetLatestAlignedFace(sim_warped_img);
-				face_analyser.GetLatestHOG(hog_descriptor, num_hog_rows, num_hog_cols);
-			}
-			
-			// Work out the pose of the head from the tracked model
-			cv::Vec6d pose_estimate = LandmarkDetector::GetPose(face_model, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy);
+			(*face_analyser).AddNextFrame(frame, (*face_model).detected_landmarks, (*face_model).detection_success, 0, false);
+			(*face_analyser).GetLatestAlignedFace(sim_warped_img);
+			(*face_analyser).GetLatestHOG(hog_descriptor, num_hog_rows, num_hog_cols);
 
-			// Keeping track of FPS
-			fps_tracker.AddFrame();
-
-			// Displaying the tracking visualizations
-			visualizer.SetImage(captured_image, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy);
-			visualizer.SetObservationFaceAlign(sim_warped_img);
-			visualizer.SetObservationHOG(hog_descriptor, num_hog_rows, num_hog_cols);
-			visualizer.SetObservationLandmarks(face_model.detected_landmarks, face_model.detection_certainty, face_model.GetVisibilities());
-			visualizer.SetObservationPose(pose_estimate, face_model.detection_certainty);
-			visualizer.SetObservationGaze(gazeDirection0, gazeDirection1, LandmarkDetector::CalculateAllEyeLandmarks(face_model), LandmarkDetector::Calculate3DEyeLandmarks(face_model, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy), face_model.detection_certainty);
-			visualizer.SetObservationActionUnits(face_analyser.GetCurrentAUsReg(), face_analyser.GetCurrentAUsClass());
-			visualizer.SetFps(fps_tracker.GetFPS());
-
-			// detect key presses
-			char character_press = visualizer.ShowObservation();
-			
-			// quit processing the current sequence (useful when in Webcam mode)
-			if (character_press == 'q')
-			{
-				break;
-			}
-
-			// Setting up the recorder output
-			open_face_rec.SetObservationHOG(detection_success, hog_descriptor, num_hog_rows, num_hog_cols, 31); // The number of channels in HOG is fixed at the moment, as using FHOG
-			open_face_rec.SetObservationVisualization(visualizer.GetVisImage());
-			open_face_rec.SetObservationActionUnits(face_analyser.GetCurrentAUsReg(), face_analyser.GetCurrentAUsClass());
-			open_face_rec.SetObservationLandmarks(face_model.detected_landmarks, face_model.GetShape(sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy),
-				face_model.params_global, face_model.params_local, face_model.detection_certainty, detection_success);
-			open_face_rec.SetObservationPose(pose_estimate);
-			open_face_rec.SetObservationGaze(gazeDirection0, gazeDirection1, gazeAngle, LandmarkDetector::CalculateAllEyeLandmarks(face_model), LandmarkDetector::Calculate3DEyeLandmarks(face_model, sequence_reader.fx, sequence_reader.fy, sequence_reader.cx, sequence_reader.cy));
-			open_face_rec.SetObservationTimestamp(sequence_reader.time_stamp);
-			open_face_rec.SetObservationFaceID(0);
-			open_face_rec.SetObservationFrameNumber(sequence_reader.GetFrameNumber());
-			open_face_rec.SetObservationFaceAlign(sim_warped_img);
-			open_face_rec.WriteObservation();
-			open_face_rec.WriteObservationTracked();
-			
-			// Reporting progress
-			if (sequence_reader.GetProgress() >= reported_completion / 10.0)
-			{
-				std::cout << reported_completion * 10 << "% ";
-				if (reported_completion == 10)
-				{
-					std::cout << std::endl;
-				}
-				reported_completion = reported_completion + 1;
-			}
-
-			// Grabbing the next frame in the sequence
-			captured_image = sequence_reader.GetNextFrame();
+			std::vector<std::pair<std::string, std::vector<double>>> aus = (*face_analyser).PostprocessOutputFile();
+			for (auto& [a, b] : aus) aus_dict[a.c_str()] = b[0];
 
 		}
-
-		INFO_STREAM("Closing output recorder");
-		open_face_rec.Close();
-		INFO_STREAM("Closing input reader");
-		sequence_reader.Close();
-		INFO_STREAM("Closed successfully");
-
-		if (recording_params.outputAUs())
-		{
-			INFO_STREAM("Postprocessing the Action Unit predictions");
-			face_analyser.PostprocessOutputFile(open_face_rec.GetCSVFile());
-		}
-
-		// Reset the models for the next video
-		face_analyser.Reset();
-		face_model.Reset();
-
+	}
+	py::dict get_last_predictions() {
+		(*face_analyser).Reset();
+		(*face_model).Reset();
+		return aus_dict;
 	}
 
-	return 0;
+	py::dict predict(py::array_t<unsigned char>& input) {
+		add_frame(input);
+		predict_aus();
+		return get_last_predictions();
+
+	}
+	~AUs() {
+		delete det_parameters;
+		delete face_model;
+		delete face_analysis_params;
+		delete face_analyser;
+	}
+
+private:
+	std::vector<std::string> arguments;
+	LandmarkDetector::FaceModelParameters* det_parameters;
+	LandmarkDetector::CLNF* face_model;
+	FaceAnalysis::FaceAnalyserParameters* face_analysis_params;
+	FaceAnalysis::FaceAnalyser* face_analyser;
+	cv::Mat frame;
+	cv::Mat_<uchar> gray_frame;
+	py::dict aus_dict;
+};
+
+void add() {
+	std::cout << "hello" << std::endl;
+}
+PYBIND11_MODULE(openface2, m) {
+	m.doc() = "python binding for openFace2";
+
+	py::class_<AUs>(m, "AUs")
+		.def(py::init<const std::string&>())
+		.def("add_frame", &AUs::add_frame)
+		.def("predict_aus", &AUs::predict_aus)
+		.def("get_last_predictions", &AUs::get_last_predictions)
+		.def("predict", &AUs::predict);
+
 }

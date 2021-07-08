@@ -105,3 +105,5 @@ lib/local/CppInerop/Debug/
 
 # IDE-generated folders
 .idea
+lib/3rdParty/OpenCV/x64/v142/bin/Debug/opencv_world410d.dll
+*.dll

@@ -1262,122 +1262,18 @@ double FaceAnalyser::GetCurrentTimeSeconds() {
 }
 
 // Allows for post processing of the AU signal
-void FaceAnalyser::PostprocessOutputFile(std::string output_file)
+std::vector<std::pair<std::string, std::vector<double>>> FaceAnalyser::PostprocessOutputFile()
 {
 
 	std::vector<double> certainties;
 	std::vector<bool> successes;
 	std::vector<double> timestamps;
-	std::vector<std::pair<std::string, std::vector<double>>> predictions_reg;
+	//std::vector<std::pair<std::string, std::vector<double>>> predictions_reg;
 	std::vector<std::pair<std::string, std::vector<double>>> predictions_class;
 
 	// Construct the new values to overwrite the output file with
-	ExtractAllPredictionsOfflineReg(predictions_reg, certainties, successes, timestamps, dynamic);
+	//ExtractAllPredictionsOfflineReg(predictions_reg, certainties, successes, timestamps, dynamic);
 	ExtractAllPredictionsOfflineClass(predictions_class, certainties, successes, timestamps, dynamic);
-
-	int num_class = (int)predictions_class.size();
-	int num_reg = (int)predictions_reg.size();
-
-	// Extract the indices of writing out first
-	std::vector<std::string> au_reg_names = GetAURegNames();
-	std::sort(au_reg_names.begin(), au_reg_names.end());
-	std::vector<int> inds_reg;
-
-	// write out ar the correct index
-	for (std::string au_name : au_reg_names)
-	{
-		for (int i = 0; i < num_reg; ++i)
-		{
-			if (au_name.compare(predictions_reg[i].first) == 0)
-			{
-				inds_reg.push_back(i);
-				break;
-			}
-		}
-	}
-
-	std::vector<std::string> au_class_names = GetAUClassNames();
-	std::sort(au_class_names.begin(), au_class_names.end());
-	std::vector<int> inds_class;
-
-	// write out ar the correct index
-	for (std::string au_name : au_class_names)
-	{
-		for (int i = 0; i < num_class; ++i)
-		{
-			if (au_name.compare(predictions_class[i].first) == 0)
-			{
-				inds_class.push_back(i);
-				break;
-			}
-		}
-	}
-	// Read all of the output file in
-	std::vector<std::string> output_file_contents;
-
-	std::ifstream infile(output_file);
-	std::string line;
-
-	while (std::getline(infile, line))
-		output_file_contents.push_back(line);
-
-	infile.close();
-
-	// Read the header and find all _r and _c parts in a file and use their indices
-	std::vector<std::string> tokens;
-	split(output_file_contents[0], tokens, ',');
-
-	int begin_ind = -1;
-
-	for (size_t i = 0; i < tokens.size(); ++i)
-	{
-		if (tokens[i].find("AU") != std::string::npos && begin_ind == -1)
-		{
-			begin_ind = (int)i;
-			break;
-		}
-	}
-	int end_ind = begin_ind + num_class + num_reg;
-
-	// Now overwrite the whole file
-	std::ofstream outfile(output_file, std::ios_base::out);
-	// Write the header
-	outfile << std::setprecision(2);
-	outfile << std::fixed;
-	outfile << std::noshowpoint;
-
-	outfile << output_file_contents[0].c_str() << "\n";
-
-	// Write the contents
-	for (int i = 1; i < (int)output_file_contents.size(); ++i)
-	{
-		std::vector<std::string> tokens;
-		split(output_file_contents[i], tokens, ',');
-
-		rtrim(tokens[0]);
-		outfile << tokens[0];
-
-		for (int t = 1; t < (int)tokens.size(); ++t)
-		{
-			if (t >= begin_ind && t < end_ind)
-			{
-				if (t - begin_ind < num_reg)
-				{
-					outfile << "," << predictions_reg[inds_reg[t - begin_ind]].second[i - 1];
-				}
-				else
-				{
-					outfile << "," << predictions_class[inds_class[t - begin_ind - num_reg]].second[i - 1];
-				}
-			}
-			else
-			{
-				rtrim(tokens[t]);
-				outfile << "," << tokens[t];
-			}
-		}
-		outfile << "\n";
-	}
-
+	return predictions_class;
 
 }
